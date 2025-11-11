@@ -1,0 +1,12 @@
+[project]
+name = "mod-auto-download"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14.0"
+dependencies = [
+    "matplotlib>=3.10.7",
+    "networkx>=3.5",
+    "requests>=2.32.5",
+    "tqdm>=4.67.1",
+]
