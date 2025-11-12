@@ -40,10 +40,16 @@ if __name__ == "__main__":
     ]
 
     get_mod(
+        # 模组列表
         mods,
+        # Minecraft 版本
         "1.20.1",
+        # 模组加载器
         "forge",
+        # 模组下载目录
         "mods",
-        False,
+        # 下载可选依赖
+        True,
+        # 最大线程数
         10,
     )

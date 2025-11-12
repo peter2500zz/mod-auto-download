@@ -281,8 +281,8 @@ class ModManager:
                 # 查询所有依赖此模组的模组
                 results = [(_v, _attrs) for _u, _v, _attrs in edges if _u == error.except_mod_id]
 
-                # 如果全都是可选项
-                if all(item[1].get('type') == 'optional' for item in results):
+                # 如果全都是可选项，且用户不强求此模组
+                if all(item[1].get('type') == 'optional' for item in results) and not any(mod.project["id"] == error.except_mod_id for mod in self.mods if mod.project is not None):
                     # 从错误里删掉这个玩意
                     errors.remove(error)
                     # 还有模组列表
@@ -305,6 +305,11 @@ class ModManager:
                 if any(mod for mod in self.mods if mod.project and nid == mod.project["id"]):
                     # 如果这个模组节点是一开始提供的模组，标为深色绿色
                     attrs["color"] = "green"
+                else:
+                    # 如果所有关系都是可选项且没主动要求这个模组
+                    results = [(_v, _attrs) for _u, _v, _attrs in edges if _u == nid]
+                    if all(item[1].get('type') == 'optional' for item in results) and not any(mod.project["id"] == nid for mod in self.mods if mod.project is not None):
+                        attrs["color"] = "lightgrey"
                 dependencies.add_node(nid, **attrs)
 
         # 存入边
