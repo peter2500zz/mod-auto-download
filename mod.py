@@ -36,12 +36,12 @@ class Mod:
         请求Modrinth的API来初始化自身信息
         """
         if progress:
-            progress.print(f"解析: [bright_black]{self.slug}[/bright_black]")
+            progress.print(f"解析 [bright_black]{self.slug}[/bright_black]")
 
         result = requests.get(self.API + f"/project/{self.slug}")
 
         if result.status_code == 404:
-            raise ModNotFoundError(f"无法找到模组 {self.slug}")
+            raise ModNotFoundError(f"无法找到模组 {self.slug}", self.project.get("id") if self.project else None)
         elif result.status_code != 200:
             result.raise_for_status()
 
@@ -49,7 +49,7 @@ class Mod:
 
         if self.project:
             if progress:
-                progress.print(f"解析成功: [green]{self.project.get("title")}[/green]")
+                progress.print(f"成功 [green]{self.project.get("title")}[/green]")
 
             return self
 
@@ -72,7 +72,7 @@ class Mod:
         result = requests.get(self.API + f"/project/{self.project.get("id")}/version", params=params)
 
         if result.status_code == 404:
-            raise ModNotFoundError(f"模组 {self.project.get("title")} 没有适用于 Minecraft {game_version} {loader} 加载器的版本")
+            raise ModNotFoundError(f"模组 {self.project.get("title")} 没有适用于 Minecraft {game_version} {loader} 加载器的版本", self.project.get("id"))
         elif result.status_code != 200:
             result.raise_for_status()
 
@@ -86,23 +86,23 @@ class Mod:
             if version_condition and loader_condition:
                 # 如果匹配直接跳出并存储版本信息
                 if progress:
-                    progress.print(f"找到版本: {self.project.get("title")} {version.get("version_number")}")
+                    progress.print(f"找到 [bright_black]{self.project.get("title")} {version.get("version_number")}[/bright_black]")
                 self.current_version = version
                 break
 
         else:
-            raise ModNotFoundError(f"模组 {self.project.get("title")} 没有适用于 Minecraft {game_version} {loader} 加载器的版本")
+            raise ModNotFoundError(f"模组 {self.project.get("title")} 没有适用于 Minecraft {game_version} {loader} 加载器的版本", self.project.get("id"))
 
     def get_version(self, progress: Optional[Progress] = None):
         if not self.project or not self.current_version:
             raise ModError(f"模组 {self.slug} 还未初始化")
         if progress:
-            progress.print(f"获取: [bright_black]{self.project.get("title")} {self.current_version.get("version_number")}[/bright_black]")
+            progress.print(f"获取 [bright_black]{self.project.get("title")} {self.current_version.get("version_number")}[/bright_black]")
 
         result = requests.get(self.API + f"/version/{self.current_version.get("id")}")
 
         if result.status_code == 404:
-            raise ModNotFoundError(f"无法找到 {self.project.get("title")} {self.current_version.get("version_number")} 版本的下载链接")
+            raise ModNotFoundError(f"无法找到 {self.project.get("title")} {self.current_version.get("version_number")} 版本的下载链接", self.project.get("id"))
         elif result.status_code != 200:
             result.raise_for_status()
 
@@ -113,5 +113,5 @@ class Mod:
 
             break
         else:
-            raise ModNotFoundError(f"{self.project.get("title")} {self.current_version.get("version_number")} 没有任何可用的下载链接")
+            raise ModNotFoundError(f"{self.project.get("title")} {self.current_version.get("version_number")} 没有任何可用的下载链接", self.project.get("id"))
 

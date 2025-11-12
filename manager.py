@@ -9,7 +9,7 @@ from pathlib import Path
 import hashlib
 from io import BytesIO
 
-from moderr import ModError
+from moderr import ModError, ModNotFoundError
 from mod import Mod
 
 
@@ -22,6 +22,9 @@ class ModManager:
     target_version: str
     target_loader: str
 
+    # finish时候输出的信息
+    msg: list
+
     # 包含依赖的所有模组
     all_mods: dict[str, Mod]
 
@@ -30,7 +33,23 @@ class ModManager:
         self.console = Console()
         self.mods = []
         self.all_mods = {}
+        self.msg = []
         # self.__cached_mods = []
+
+    def __enter__(self):
+        self.msg = []
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.finish()
+
+        return False
+
+    def finish(self):
+        self.__pool.shutdown()
+
+        for msg in self.msg:
+            self.console.print(msg)
 
     def init_mod(self) -> bool:
         """
@@ -55,7 +74,7 @@ class ModManager:
                 try:
                     future.result()
                 except ModError as e:
-                    progress.print(f"[yellow]警告: {e}[/yellow]")
+                    progress.print(f"[yellow]警告 {e}[/yellow]")
                     errors.append(e)
                 except Exception:
                     # 真的很异常的异常应当上报
@@ -70,7 +89,7 @@ class ModManager:
             e_tree = Tree("由于以下原因，将不会继续")
             for error in errors:
                 e_tree.add(f"[yellow]{error}[/yellow]")
-            self.console.print(e_tree)
+            self.msg.append(e_tree)
             return False
         return True
 
@@ -101,7 +120,7 @@ class ModManager:
                 try:
                     future.result()
                 except ModError as e:
-                    progress.print(f"[yellow]警告: {e}[/yellow]")
+                    progress.print(f"[yellow]警告 {e}[/yellow]")
                     errors.append(e)
                 except Exception:
                     # 真的很异常的异常应当上报
@@ -116,7 +135,7 @@ class ModManager:
             e_tree = Tree("由于以下原因，将不会继续")
             for error in errors:
                 e_tree.add(f"[yellow]{error}[/yellow]")
-            self.console.print(e_tree)
+            self.msg.append(e_tree)
             return False
         return True
 
@@ -128,12 +147,15 @@ class ModManager:
         """
 
         # 用内置类型先存储图的信息，方便进行修改
+        # 项目ID: 信息
         nodes: dict[str, dict | None] = {}
+        # (项目ID, 项目ID, 信息)
         edges: list[tuple[str, str, dict]] = []
 
         edge_style = {
             "required": {
-                "color": "lightgreen"
+                "color": "lightgreen",
+                "type": "required",
             },
             "incompatible": {
                 "label": "❌", 
@@ -141,14 +163,15 @@ class ModManager:
                 "font": {
                     "align": "middle"
                 },
-                "warn": "incompatible"
+                "type": "incompatible"
             },
             "optional": {
-                "color": "lightgrey"
+                "color": "lightgrey",
+                "type": "optional",
             },
             "embedded": {
                 "color": "lightpurple",
-                "warn": "embedded"
+                "type": "embedded"
             }
         }
 
@@ -156,7 +179,7 @@ class ModManager:
         with Progress(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
-            transient=True
+            MofNCompleteColumn()
         ) as progress:
             task_id = progress.add_task("解析依赖", True, total=None)
 
@@ -199,6 +222,8 @@ class ModManager:
                     # 获取该模组的依赖
                     deps: list[dict] = mod.current_version["dependencies"]
 
+                    progress.print(f"解析 [bright_black]{mod.project.get("title")} {mod.current_version.get("version_number")}[/bright_black]")
+
                     for dep in deps:
                         # 模组是否已经存在
                         mod_already_exists: bool = dep["project_id"] in nodes
@@ -227,8 +252,6 @@ class ModManager:
                     if mod.project is None or mod.current_version is None:
                         raise ModError(f"模组 {mod.slug} 还未初始化")
 
-                    progress.print(f"解析到 {mod.project.get("title")} {mod.current_version.get("version_number")}")
-
                 # 多线程解析依赖
                 futures = [self.__pool.submit(init, dep_mod) for dep_mod in dep_mods]
 
@@ -236,7 +259,7 @@ class ModManager:
                     try:
                         future.result()
                     except ModError as e:
-                        progress.print(f"[yellow]警告: {e}[/yellow]")
+                        progress.print(f"[yellow]警告 {e}[/yellow]")
                         errors.append(e)
                     except Exception:
                         progress.stop()
@@ -248,6 +271,28 @@ class ModManager:
 
                 # 应用到暂存列表
                 mods_cur = dep_mods
+
+            progress.update(task_id, completed=len(nodes), total=len(nodes))
+
+        for error in errors.copy():
+            if isinstance(error, ModNotFoundError):
+                if error.except_mod_id is None:
+                    continue
+                # 查询所有依赖此模组的模组
+                results = [(_v, _attrs) for _u, _v, _attrs in edges if _u == error.except_mod_id]
+
+                # 如果全都是可选项
+                if all(item[1].get('type') == 'optional' for item in results):
+                    # 从错误里删掉这个玩意
+                    errors.remove(error)
+                    # 还有模组列表
+                    del self.all_mods[error.except_mod_id]
+                    # 节点也是
+                    del nodes[error.except_mod_id]
+                    # 边也是
+                    edges = [edge for edge in edges if edge[0] != error.except_mod_id]
+
+                    self.msg.append(f"[yellow]{error}，但是所有需要它的模组都不是强制需求，已从依赖中删除此模组[/yellow]")
 
         # 创建有向图
         dependencies: nx.DiGraph[str] = nx.DiGraph()
@@ -273,7 +318,7 @@ class ModManager:
                 raise ModError(f"{u} 到 {v} 两侧的模组不存在")
 
             # 处理存在问题的模组
-            match attrs.get("warn"):
+            match attrs["type"]:
                 # 不兼容
                 case "incompatible":
                     # 找到所有与此模组有关系的模组
@@ -286,8 +331,8 @@ class ModManager:
                         dep_mode = nodes.get(_v)
                         if dep_mode is None:
                             raise ModError(f"{_v} 不存在")
-                        # 如果存在 warn 字段，说明这不是一个正常依赖关系，而是冲突关系
-                        if "warn" not in _attrs:
+                        # 排除冲突类型
+                        if _attrs["type"] not in ["incompatible", "embedded"]:
                             true_deps.append(f"[yellow]{dep_mode["_label"]}[/yellow]")
 
                     # 如果有任何正常依赖它的模组
@@ -304,7 +349,7 @@ class ModManager:
         net.from_nx(dependencies)
 
         net.write_html("dependencies.html", notebook=False, open_browser=False)
-        self.console.print("依赖图已保存为 [bold]dependencies.html[/bold]")
+        self.msg.append("依赖图已保存为 [bold]dependencies.html[/bold]")
 
         if errors:
             e_tree = Tree("由于以下原因，将不会继续")
@@ -314,8 +359,8 @@ class ModManager:
                         e_tree.add(arg)
                     else:
                         e_tree.add(f"[yellow]{arg}[/yellow]")
-            self.console.print(e_tree)
-            self.console.print("请参阅依赖图")
+            self.msg.append(e_tree)
+            self.msg.append("请参阅依赖图")
 
             return False
         return True
@@ -343,7 +388,7 @@ class ModManager:
                 try:
                     future.result()
                 except ModError as e:
-                    progress.print(f"[yellow]警告: {e}[/yellow]")
+                    progress.print(f"[yellow]警告 {e}[/yellow]")
                     errors.append(e)
                 except Exception:
                     # 真的很异常的异常应当上报
@@ -359,7 +404,7 @@ class ModManager:
             e_tree = Tree("由于以下原因，将不会继续")
             for error in errors:
                 e_tree.add(f"[yellow]{error}[/yellow]")
-            self.console.print(e_tree)
+            self.msg.append(e_tree)
             return False
 
         errors = []
@@ -402,13 +447,14 @@ class ModManager:
                     if actual != mod.file_data["hashes"]["sha512"]:
                         buf.close()
                         raise ValueError(f"{mod.file_data["filename"]} 的哈希校验失败")
-                    progress.print(f"校验成功: [bright_black]{mod.file_data["filename"]}[/bright_black]")
 
                     # 写入文件
                     buf.seek(0)
                     with open(mod_path / mod.file_data["filename"], "wb") as f:
                         f.write(buf.getbuffer())
                     buf.close()
+
+                    progress.print(f"保存为 [bright_black]{(mod_path / mod.file_data["filename"]).relative_to(".")}[/bright_black]")
 
                     download_progress.remove_task(_task_id)
 
@@ -420,10 +466,10 @@ class ModManager:
                     try:
                         future.result()
                     except ValueError as e:
-                        progress.print(f"[red]错误: {e}[/red]")
+                        progress.print(f"[red]错误 {e}[/red]")
                         errors.append(e)
                     except ModError as e:
-                        progress.print(f"[yellow]警告: {e}[/yellow]")
+                        progress.print(f"[yellow]警告 {e}[/yellow]")
                         errors.append(e)
                     except Exception:
                         # 真的很异常的异常应当上报
@@ -438,5 +484,5 @@ class ModManager:
             e_tree = Tree("下载模组时遇到问题")
             for error in errors:
                 e_tree.add(f"[yellow]{error}[/yellow]")
-            self.console.print(e_tree)
+            self.msg.append(e_tree)
             return False

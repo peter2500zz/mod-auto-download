@@ -11,3 +11,4 @@ wheels/
 lib
 dependencies.html
 mods
+test.py

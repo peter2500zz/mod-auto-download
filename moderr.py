@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from mod import Mod
 
@@ -10,7 +10,11 @@ class SlugNotValid(ModError):
         super().__init__(f"{bad_slug} 是无效的 mod slug")
 
 class ModNotFoundError(ModError):
-    pass
+    except_mod_id: Optional[str]
+
+    def __init__(self, msg: str, except_mod_id: Optional[str]) -> None:
+        self.except_mod_id = except_mod_id
+        super().__init__(msg)
 
 class ModIncompatibleError(ModError):
     def __init__(self, moda: Mod, modb: Mod) -> None:
