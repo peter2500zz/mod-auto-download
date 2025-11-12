@@ -15,6 +15,8 @@ class Mod:
     project: Optional[dict]
     # 参见 https://docs.modrinth.com/api/operations/getprojectversions/
     current_version: Optional[dict]
+    # 参见 https://docs.modrinth.com/api/operations/getversion/
+    file_data: Optional[dict]
 
     def __init__(self, url: str) -> None:
         slug = url.split("/")[-1]
@@ -24,6 +26,7 @@ class Mod:
             self.slug = slug
             self.project = None
             self.current_version = None
+            self.file_data = None
 
         else:
             raise SlugNotValid(slug)
@@ -89,4 +92,26 @@ class Mod:
 
         else:
             raise ModNotFoundError(f"模组 {self.project.get("title")} 没有适用于 Minecraft {game_version} {loader} 加载器的版本")
+
+    def get_version(self, progress: Optional[Progress] = None):
+        if not self.project or not self.current_version:
+            raise ModError(f"模组 {self.slug} 还未初始化")
+        if progress:
+            progress.print(f"获取: [bright_black]{self.project.get("title")} {self.current_version.get("version_number")}[/bright_black]")
+
+        result = requests.get(self.API + f"/version/{self.current_version.get("id")}")
+
+        if result.status_code == 404:
+            raise ModNotFoundError(f"无法找到 {self.project.get("title")} {self.current_version.get("version_number")} 版本的下载链接")
+        elif result.status_code != 200:
+            result.raise_for_status()
+
+        result_data: dict = result.json()
+
+        for file in result_data.get("files", []):
+            self.file_data = file
+
+            break
+        else:
+            raise ModNotFoundError(f"{self.project.get("title")} {self.current_version.get("version_number")} 没有任何可用的下载链接")
 

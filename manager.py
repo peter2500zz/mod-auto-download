@@ -1,9 +1,13 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import networkx as nx
-from rich.progress import Progress
+import requests
+from rich.progress import Progress, DownloadColumn, TextColumn, BarColumn, TransferSpeedColumn, MofNCompleteColumn
 from rich.console import Console
 from rich.tree import Tree
 from pyvis.network import Network
+from pathlib import Path
+import hashlib
+from io import BytesIO
 
 from moderr import ModError
 from mod import Mod
@@ -13,15 +17,19 @@ class ModManager:
     # 维护一个线程池来并发请求
     __pool: ThreadPoolExecutor
     console: Console
+    # 需要的模组
     mods: list[Mod] = []
     target_version: str
     target_loader: str
-    dependencies: nx.DiGraph
-    
+
+    # 包含依赖的所有模组
+    all_mods: dict[str, Mod]
+
     def __init__(self, threads: int = 4) -> None:
         self.__pool = ThreadPoolExecutor(threads)
         self.console = Console()
         self.mods = []
+        self.all_mods = {}
         # self.__cached_mods = []
 
     def init_mod(self) -> bool:
@@ -32,7 +40,11 @@ class ModManager:
         """
 
         errors: list[ModError] = []
-        with Progress() as progress:
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+        ) as progress:
             task_id = progress.add_task("解析模组", True, len(self.mods))
 
             # 多线程初始化
@@ -74,7 +86,11 @@ class ModManager:
         self.target_loader = loader
 
         errors: list[ModError] = []
-        with Progress() as progress:
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+        ) as progress:
             task_id = progress.add_task("搜索版本", True, len(self.mods))
 
             # 多线程检查版本可用性
@@ -137,22 +153,28 @@ class ModManager:
         }
 
         errors: list[ModError] = []
-        with Progress() as progress:
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            transient=True
+        ) as progress:
             task_id = progress.add_task("解析依赖", True, total=None)
 
             # mod_cur 存储本次循环需要解析依赖的模组
             # 初始化为已有的模组
-            mod_cur = self.mods.copy()
+            mods_cur = self.mods.copy()
 
             # 直到没有模组的依赖需要解析，一直运行
-            while mod_cur:
+            while mods_cur:
                 # 初始化本轮次模组产生的依赖暂存列表
                 dep_mods: list[Mod] = []
 
                 # 遍历本轮次所有需要解析的模组
-                for mod in mod_cur:
+                for mod in mods_cur:
                     if mod.project is None:
-                        raise ModError
+                        raise ModError(f"模组 {mod.slug} 还未初始化")
+
+                    self.all_mods[mod.project["id"]] = mod
 
                     if mod.current_version is None:
                         # 如果这个模组没有当前版本的信息
@@ -170,7 +192,7 @@ class ModManager:
                         "label": mod.project["title"], 
                         "_label": mod.project["title"], 
                         "color": "lightgreen", 
-                        "version": mod.current_version["id"],
+                        "version": mod.current_version,
                         "href": f"https://modrinth.com/mod/{mod.project["slug"]}"
                     }
 
@@ -203,7 +225,8 @@ class ModManager:
                     mod.init()
                     mod.query_version(self.target_version, self.target_loader)
                     if mod.project is None or mod.current_version is None:
-                        raise ModError
+                        raise ModError(f"模组 {mod.slug} 还未初始化")
+
                     progress.print(f"解析到 {mod.project.get("title")} {mod.current_version.get("version_number")}")
 
                 # 多线程解析依赖
@@ -224,10 +247,7 @@ class ModManager:
                         progress.update(task_id, advance=1)
 
                 # 应用到暂存列表
-                mod_cur = dep_mods
-
-            # 解析结束，关掉进度条
-            progress.remove_task(task_id)
+                mods_cur = dep_mods
 
         # 创建有向图
         dependencies: nx.DiGraph[str] = nx.DiGraph()
@@ -280,13 +300,11 @@ class ModManager:
                     errors.append(ModError(dep_tree))
 
         # 创建可视化图
-        net = Network(width="100%", notebook=False, directed=True, cdn_resources='local')
+        net = Network(width="100%", height="100vh", notebook=False, directed=True, cdn_resources='local')
         net.from_nx(dependencies)
 
         net.write_html("dependencies.html", notebook=False, open_browser=False)
         self.console.print("依赖图已保存为 [bold]dependencies.html[/bold]")
-
-        self.dependencies = dependencies
 
         if errors:
             e_tree = Tree("由于以下原因，将不会继续")
@@ -297,8 +315,128 @@ class ModManager:
                     else:
                         e_tree.add(f"[yellow]{arg}[/yellow]")
             self.console.print(e_tree)
-            self.console.print("请参阅日志或依赖图")
+            self.console.print("请参阅依赖图")
 
             return False
         return True
 
+    def download_mods(self, mod_dir: str):
+        # 转换为路径
+        mod_path = Path(mod_dir)
+        # 创建下载目录
+        mod_path.mkdir(parents=True, exist_ok=True)
+
+
+        errors: list[Exception] = []
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+        ) as progress:
+            task_id = progress.add_task("获取下载链接", True, len(self.all_mods))
+
+            # 多线程查找下载链接
+            futures = [self.__pool.submit(mod.get_version, progress) for mod in self.all_mods.values()]
+
+            # 等待所有任务结束
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except ModError as e:
+                    progress.print(f"[yellow]警告: {e}[/yellow]")
+                    errors.append(e)
+                except Exception:
+                    # 真的很异常的异常应当上报
+                    progress.stop()
+                    self.__pool.shutdown()
+
+                    raise
+                finally:
+                    progress.update(task_id, advance=1)
+
+            
+        if errors:
+            e_tree = Tree("由于以下原因，将不会继续")
+            for error in errors:
+                e_tree.add(f"[yellow]{error}[/yellow]")
+            self.console.print(e_tree)
+            return False
+
+        errors = []
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn()
+        ) as progress:
+            task_id = progress.add_task("下载模组", True, len(self.all_mods))
+
+            with Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                DownloadColumn(),
+                TransferSpeedColumn(),
+                transient=True,
+            ) as download_progress:
+                # 下载工具函数
+                def download(mod: Mod):
+                    if not mod.file_data:
+                        raise ModError(f"模组 {mod.slug} 还未初始化")
+                    _task_id = download_progress.add_task(mod.file_data["filename"], True, mod.file_data["size"])
+
+                    # 哈希器
+                    hasher = hashlib.sha512()
+                    # 缓冲区
+                    buf = BytesIO()
+
+                    with requests.get(mod.file_data["url"], stream=True) as r:
+                        r.raise_for_status()
+                        for chunk in r.iter_content(chunk_size=1024):
+                            if not chunk:
+                                continue
+                            buf.write(chunk)
+                            hasher.update(chunk)
+                            download_progress.update(_task_id, advance=len(chunk))
+
+                    # 计算哈希
+                    actual = hasher.hexdigest().lower()
+                    if actual != mod.file_data["hashes"]["sha512"]:
+                        buf.close()
+                        raise ValueError(f"{mod.file_data["filename"]} 的哈希校验失败")
+                    progress.print(f"校验成功: [bright_black]{mod.file_data["filename"]}[/bright_black]")
+
+                    # 写入文件
+                    buf.seek(0)
+                    with open(mod_path / mod.file_data["filename"], "wb") as f:
+                        f.write(buf.getbuffer())
+                    buf.close()
+
+                    download_progress.remove_task(_task_id)
+
+                # 多线程下载模组
+                futures = [self.__pool.submit(download, mod) for mod in self.all_mods.values()]
+
+                # 等待所有任务结束
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except ValueError as e:
+                        progress.print(f"[red]错误: {e}[/red]")
+                        errors.append(e)
+                    except ModError as e:
+                        progress.print(f"[yellow]警告: {e}[/yellow]")
+                        errors.append(e)
+                    except Exception:
+                        # 真的很异常的异常应当上报
+                        progress.stop()
+                        self.__pool.shutdown()
+
+                        raise
+                    finally:
+                        progress.update(task_id, advance=1)
+
+        if errors:
+            e_tree = Tree("下载模组时遇到问题")
+            for error in errors:
+                e_tree.add(f"[yellow]{error}[/yellow]")
+            self.console.print(e_tree)
+            return False

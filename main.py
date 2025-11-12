@@ -4,7 +4,7 @@ from manager import ModManager
 from mod import Mod
 
 
-def get_mod(mods: list[Mod], game_version: str, loader: str, threads: int = 4):
+def get_mod(mods: list[Mod], game_version: str, loader: str, download_dir: str, threads: int = 4):
     console = Console()
 
     try:
@@ -17,6 +17,8 @@ def get_mod(mods: list[Mod], game_version: str, loader: str, threads: int = 4):
             return
         if not mm.resolve_dependencies():
             return
+        if not mm.download_mods(download_dir):
+            return
 
     except Exception:
         console.line()
@@ -25,20 +27,21 @@ def get_mod(mods: list[Mod], game_version: str, loader: str, threads: int = 4):
 if __name__ == "__main__":
     mods = [
         Mod("hexal"),
-        Mod("antique-atlas-4"),
+        # Mod("antique-atlas-4"),
         Mod("oculus"),
         Mod("embeddium"),
         Mod("https://modrinth.com/mod/rubidium-extra"),
-        Mod("https://modrinth.com/mod/rubidium"),
+        # Mod("https://modrinth.com/mod/rubidium"),
         Mod("fastload"),
-        Mod("textrues-embeddium-options"),
+        # Mod("textrues-embeddium-options"),
         Mod("https://modrinth.com/mod/goety-cataclysm"),
-        Mod("https://modrinth.com/mod/textrues-rubidium-options")
+        # Mod("https://modrinth.com/mod/textrues-rubidium-options")
     ]
 
     get_mod(
         mods,
         "1.20.1",
         "forge",
-        10
+        "mods",
+        10,
     )
