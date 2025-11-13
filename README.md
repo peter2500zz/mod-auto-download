@@ -34,7 +34,7 @@ get_mod(
 
 <figure>
   <img src="docs/images/mods.png" alt="我的模组" style="border-radius:6px">
-  <figcaption style="color:lightgrey">带上你所有喜欢的模组！</figcaption>
+  <figcaption style="color:lightgrey">带上所有你喜欢的模组！</figcaption>
 </figure>
 
 如果解析出现了问题，日志会告诉你发生了什么，对于依赖还会生成一个可视化网页提供排查！

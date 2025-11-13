@@ -4,14 +4,27 @@ from manager import ModManager
 from mod import Mod
 
 
-def get_mod(mods: list[Mod], game_version: str, loader: str, download_dir: str, allow_optional_mod: bool = False, threads: int = 4):
+def get_mod(
+    mods: list[Mod], 
+    game_version: str, 
+    loader: str, 
+    download_dir: str, 
+    for_client: bool = True, 
+    for_server: bool = True, 
+    allow_optional_mod: bool = False, 
+    threads: int = 4
+):
     console = Console()
+
+    if not any([for_client, for_server]):
+        console.print("既不要客户端也不要服务器，何意味？")
+        return
 
     try:
         with ModManager(threads) as mm:
             mm.mods = mods
 
-            if not mm.init_mod():
+            if not mm.init_mod(for_client, for_server):
                 return
             if not mm.set_version(game_version, loader):
                 return
@@ -49,6 +62,8 @@ if __name__ == "__main__":
         # 模组下载目录
         "mods",
         # 下载可选依赖
+        True,
+        True,
         True,
         # 最大线程数
         10,

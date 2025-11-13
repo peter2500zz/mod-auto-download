@@ -51,7 +51,7 @@ class ModManager:
         for msg in self.msg:
             self.console.print(msg)
 
-    def init_mod(self) -> bool:
+    def init_mod(self, client: bool, server: bool) -> bool:
         """
         统一初始化已有的模组
 
@@ -67,7 +67,7 @@ class ModManager:
             task_id = progress.add_task("解析模组", True, len(self.mods))
 
             # 多线程初始化
-            futures = [self.__pool.submit(mod.init, progress) for mod in self.mods]
+            futures = [self.__pool.submit(mod.init, client, server, progress) for mod in self.mods]
 
             # 等待所有任务结束
             for future in as_completed(futures):

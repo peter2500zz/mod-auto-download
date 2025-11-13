@@ -31,7 +31,7 @@ class Mod:
         else:
             raise SlugNotValid(slug)
 
-    def init(self, progress: Optional[Progress] = None) -> Self:
+    def init(self, client: bool = True, server: bool = True, progress: Optional[Progress] = None) -> Self:
         """
         请求Modrinth的API来初始化自身信息
         """
@@ -48,6 +48,22 @@ class Mod:
         self.project = result.json()
 
         if self.project:
+            if client:
+                match self.project.get("client_side"):
+                    case "unsupported":
+                        raise ModNotFoundError(f"模组 {self.project.get("title")} 没有客户端版本", self.project.get("id"))
+                    case "unknown":
+                        if progress:
+                            progress.print(f"[yellow]警告 {f"模组 {self.project.get("title")} 不确定在客户端是否可用"}[/yellow]")
+
+            if server:
+                match self.project.get("server_side"):
+                    case "unsupported":
+                        raise ModNotFoundError(f"模组 {self.project.get("title")} 没有服务器版本", self.project.get("id"))
+                    case "unknown":
+                        if progress:
+                            progress.print(f"[yellow]警告 {f"模组 {self.project.get("title")} 不确定在服务器是否可用"}[/yellow]")
+            
             if progress:
                 progress.print(f"成功 [green]{self.project.get("title")}[/green]")
 
@@ -55,7 +71,7 @@ class Mod:
 
         raise ModError(f"{self.slug} 的数据解析失败")
 
-    def query_version(self, game_version: str, loader: str, progress: Optional[Progress] = None):
+    def query_version(self, game_version: str, loader: str,  progress: Optional[Progress] = None):
         """
         根据给定游戏版本和加载器来查找最新的模组
         """
