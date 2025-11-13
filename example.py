@@ -1,4 +1,5 @@
 from rich.console import Console
+import sys
 
 from manager import ModManager
 from mod import Mod
@@ -9,22 +10,17 @@ def get_mod(
     game_version: str, 
     loader: str, 
     download_dir: str, 
-    for_client: bool = True, 
-    for_server: bool = True, 
+    require_client: bool = False, 
+    require_server: bool = False, 
     allow_optional_mod: bool = False, 
-    threads: int = 4
+    threads: int = 4,
+    console: Console = Console()
 ):
-    console = Console()
-
-    if not any([for_client, for_server]):
-        console.print("既不要客户端也不要服务器，何意味？")
-        return
-
     try:
-        with ModManager(threads) as mm:
+        with ModManager(threads, console) as mm:
             mm.mods = mods
 
-            if not mm.init_mod(for_client, for_server):
+            if not mm.init_mod(require_client, require_server):
                 return
             if not mm.set_version(game_version, loader):
                 return
@@ -33,8 +29,10 @@ def get_mod(
             if not mm.download_mods(download_dir):
                 return
 
+    except KeyboardInterrupt:
+        mm.finish()
+        sys.exit(1)
     except Exception:
-        console.line()
         console.print_exception()
 
 
@@ -63,8 +61,4 @@ if __name__ == "__main__":
         "mods",
         # 下载可选依赖
         True,
-        True,
-        True,
-        # 最大线程数
-        10,
     )

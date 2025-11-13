@@ -1,4 +1,6 @@
-from typing import Optional, Self
+from typing import Optional, Self, TYPE_CHECKING
+if TYPE_CHECKING:
+    from manager import RateLimiter
 from rich.progress import Progress
 import requests
 import re
@@ -31,13 +33,15 @@ class Mod:
         else:
             raise SlugNotValid(slug)
 
-    def init(self, client: bool = True, server: bool = True, progress: Optional[Progress] = None) -> Self:
+    def init(self, require_client: bool = True, require_server: bool = True, progress: Optional[Progress] = None, rl: Optional[RateLimiter] = None) -> Self:
         """
         请求Modrinth的API来初始化自身信息
         """
         if progress:
             progress.print(f"解析 [bright_black]{self.slug}[/bright_black]")
 
+        if rl:
+            rl.wait()
         result = requests.get(self.API + f"/project/{self.slug}")
 
         if result.status_code == 404:
@@ -48,7 +52,7 @@ class Mod:
         self.project = result.json()
 
         if self.project:
-            if client:
+            if require_client:
                 match self.project.get("client_side"):
                     case "unsupported":
                         raise ModNotFoundError(f"模组 {self.project.get("title")} 没有客户端版本", self.project.get("id"))
@@ -56,7 +60,7 @@ class Mod:
                         if progress:
                             progress.print(f"[yellow]警告 {f"模组 {self.project.get("title")} 不确定在客户端是否可用"}[/yellow]")
 
-            if server:
+            if require_server:
                 match self.project.get("server_side"):
                     case "unsupported":
                         raise ModNotFoundError(f"模组 {self.project.get("title")} 没有服务器版本", self.project.get("id"))
@@ -71,7 +75,7 @@ class Mod:
 
         raise ModError(f"{self.slug} 的数据解析失败")
 
-    def query_version(self, game_version: str, loader: str,  progress: Optional[Progress] = None):
+    def query_version(self, game_version: str, loader: str,  progress: Optional[Progress] = None, rl: Optional[RateLimiter] = None):
         """
         根据给定游戏版本和加载器来查找最新的模组
         """
@@ -85,6 +89,8 @@ class Mod:
             "featured": json.dumps(True),
         }
 
+        if rl:
+            rl.wait()
         result = requests.get(self.API + f"/project/{self.project.get("id")}/version", params=params)
 
         if result.status_code == 404:
@@ -109,12 +115,14 @@ class Mod:
         else:
             raise ModNotFoundError(f"模组 {self.project.get("title")} 没有适用于 Minecraft {game_version} {loader} 加载器的版本", self.project.get("id"))
 
-    def get_version(self, progress: Optional[Progress] = None):
+    def get_version(self, progress: Optional[Progress] = None, rl: Optional[RateLimiter] = None):
         if not self.project or not self.current_version:
             raise ModError(f"模组 {self.slug} 还未初始化")
         if progress:
             progress.print(f"获取 [bright_black]{self.project.get("title")} {self.current_version.get("version_number")}[/bright_black]")
 
+        if rl:
+            rl.wait()
         result = requests.get(self.API + f"/version/{self.current_version.get("id")}")
 
         if result.status_code == 404:

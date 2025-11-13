@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 import networkx as nx
 import requests
 from rich.progress import Progress, DownloadColumn, TextColumn, BarColumn, TransferSpeedColumn, MofNCompleteColumn
@@ -8,12 +9,40 @@ from pyvis.network import Network
 from pathlib import Path
 import hashlib
 from io import BytesIO
+import time
 
 from moderr import ModError, ModNotFoundError
 from mod import Mod
 
 
+class RateLimiter:
+    """
+    Modrinth 的接口是有速率限制的
+    """
+
+    rate_limit: float
+    last_req: float
+
+    def __init__(self, req_per_min: int) -> None:
+        self.rate_limit = 60 / req_per_min
+        self.last_req = 0.0
+        # 为并发加锁
+        self.lock = threading.Lock()
+
+    def wait(self):
+        # 等待锁
+        with self.lock:
+            now = time.time()
+            delta = now - self.last_req
+
+            if delta < self.rate_limit:
+                time.sleep(self.rate_limit - delta)
+
+            self.last_req = time.time()
+
 class ModManager:
+    # 限制请求速率
+    rl: RateLimiter
     # 维护一个线程池来并发请求
     __pool: ThreadPoolExecutor
     console: Console
@@ -21,23 +50,30 @@ class ModManager:
     mods: list[Mod] = []
     target_version: str
     target_loader: str
+    require_client: bool 
+    require_server: bool
 
     # finish时候输出的信息
-    msg: list
+    finalmsg: list
+
+    # 用于减少依赖图提示信息中的无效内容
+    met_condition: set[str]
 
     # 包含依赖的所有模组
     all_mods: dict[str, Mod]
 
-    def __init__(self, threads: int = 4) -> None:
+    def __init__(self, threads: int = 4, console: Console = Console()) -> None:
         self.__pool = ThreadPoolExecutor(threads)
-        self.console = Console()
+        self.console = console
         self.mods = []
         self.all_mods = {}
-        self.msg = []
+        self.finalmsg = []
+        self.met_condition = set()
+        self.rl = RateLimiter(300)
         # self.__cached_mods = []
 
     def __enter__(self):
-        self.msg = []
+        self.finalmsg = []
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -48,26 +84,32 @@ class ModManager:
     def finish(self):
         self.__pool.shutdown()
 
-        for msg in self.msg:
+        for msg in self.finalmsg:
             self.console.print(msg)
+        self.finalmsg = []
+        self.met_condition = set()
 
-    def init_mod(self, client: bool, server: bool) -> bool:
+    def init_mod(self, require_client: bool, require_server: bool) -> bool:
         """
         统一初始化已有的模组
 
         return: 是否应该继续
         """
 
+        self.require_client = require_client
+        self.require_server = require_server
+
         errors: list[ModError] = []
         with Progress(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             MofNCompleteColumn(),
+            console=self.console
         ) as progress:
             task_id = progress.add_task("解析模组", True, len(self.mods))
 
             # 多线程初始化
-            futures = [self.__pool.submit(mod.init, client, server, progress) for mod in self.mods]
+            futures = [self.__pool.submit(mod.init, require_client, require_server, progress, self.rl) for mod in self.mods]
 
             # 等待所有任务结束
             for future in as_completed(futures):
@@ -89,7 +131,7 @@ class ModManager:
             e_tree = Tree("由于以下原因，将不会继续")
             for error in errors:
                 e_tree.add(f"[yellow]{error}[/yellow]")
-            self.msg.append(e_tree)
+            self.finalmsg.append(e_tree)
             return False
         return True
 
@@ -109,11 +151,12 @@ class ModManager:
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             MofNCompleteColumn(),
+            console=self.console
         ) as progress:
             task_id = progress.add_task("搜索版本", True, len(self.mods))
 
             # 多线程检查版本可用性
-            futures = [self.__pool.submit(mod.query_version, self.target_version, self.target_loader, progress) for mod in self.mods]
+            futures = [self.__pool.submit(mod.query_version, self.target_version, self.target_loader, progress, self.rl) for mod in self.mods]
 
             # 等待所有任务结束
             for future in as_completed(futures):
@@ -135,7 +178,7 @@ class ModManager:
             e_tree = Tree("由于以下原因，将不会继续")
             for error in errors:
                 e_tree.add(f"[yellow]{error}[/yellow]")
-            self.msg.append(e_tree)
+            self.finalmsg.append(e_tree)
             return False
         return True
 
@@ -179,7 +222,8 @@ class ModManager:
         with Progress(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
-            MofNCompleteColumn()
+            MofNCompleteColumn(),
+            console=self.console
         ) as progress:
             task_id = progress.add_task("解析依赖", True, total=None)
 
@@ -225,6 +269,8 @@ class ModManager:
                     progress.print(f"解析 [bright_black]{mod.project.get("title")} {mod.current_version.get("version_number")}[/bright_black]")
 
                     for dep in deps:
+                        self.met_condition.add(dep["dependency_type"])
+
                         # 模组是否已经存在
                         mod_already_exists: bool = dep["project_id"] in nodes
                         # 模组是否冲突
@@ -247,8 +293,8 @@ class ModManager:
 
                 # 快速初始化模组（因为是依赖）
                 def init(mod: Mod):
-                    mod.init()
-                    mod.query_version(self.target_version, self.target_loader)
+                    mod.init(self.require_client, self.require_server, rl=self.rl)
+                    mod.query_version(self.target_version, self.target_loader, rl=self.rl)
                     if mod.project is None or mod.current_version is None:
                         raise ModError(f"模组 {mod.slug} 还未初始化")
 
@@ -292,7 +338,7 @@ class ModManager:
                     # 边也是
                     edges = [edge for edge in edges if edge[0] != error.except_mod_id]
 
-                    self.msg.append(f"[yellow]{error}，但是所有需要它的模组都不是强制需求，已从依赖中删除此模组[/yellow]")
+                    self.finalmsg.append(f"[yellow]{error}，但是所有需要它的模组都不是强制需求，已从依赖中删除此模组[/yellow]")
 
         # 创建有向图
         dependencies: nx.DiGraph[str] = nx.DiGraph()
@@ -354,7 +400,7 @@ class ModManager:
         net.from_nx(dependencies)
 
         net.write_html("dependencies.html", notebook=False, open_browser=False)
-        self.msg.append("依赖图已保存为 [bold]dependencies.html[/bold]")
+        self.finalmsg.append("依赖图已保存")
 
         if errors:
             e_tree = Tree("由于以下原因，将不会继续")
@@ -364,8 +410,16 @@ class ModManager:
                         e_tree.add(arg)
                     else:
                         e_tree.add(f"[yellow]{arg}[/yellow]")
-            self.msg.append(e_tree)
-            self.msg.append("请参阅依赖图")
+            self.finalmsg.append(e_tree)
+            dep_desc = Tree("请参阅依赖图 [bold]dependencies.html[/bold]")
+            dep_desc.add("[bold][#008000]绿色[/][/bold]节点代表清单中的模组")
+            if "required" in self.met_condition:
+                dep_desc.add("[bold][#90EE90]淡绿色[/][/bold]节点/箭头代表必要依赖")
+            if "optional" in self.met_condition:
+                dep_desc.add("[bold][#D3D3D3]灰色[/][/bold]节点/箭头代表可选依赖")
+            if "incompatible" in self.met_condition:
+                dep_desc.add("[bold][#FF0000]红色[/][/bold]节点/箭头代表冲突项目")
+            self.finalmsg.append(dep_desc)
 
             return False
         return True
@@ -382,11 +436,12 @@ class ModManager:
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             MofNCompleteColumn(),
+            console=self.console
         ) as progress:
             task_id = progress.add_task("获取下载链接", True, len(self.all_mods))
 
             # 多线程查找下载链接
-            futures = [self.__pool.submit(mod.get_version, progress) for mod in self.all_mods.values()]
+            futures = [self.__pool.submit(mod.get_version, progress, self.rl) for mod in self.all_mods.values()]
 
             # 等待所有任务结束
             for future in as_completed(futures):
@@ -409,14 +464,15 @@ class ModManager:
             e_tree = Tree("由于以下原因，将不会继续")
             for error in errors:
                 e_tree.add(f"[yellow]{error}[/yellow]")
-            self.msg.append(e_tree)
+            self.finalmsg.append(e_tree)
             return False
 
         errors = []
         with Progress(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
-            MofNCompleteColumn()
+            MofNCompleteColumn(),
+            console=self.console
         ) as progress:
             task_id = progress.add_task("下载模组", True, len(self.all_mods))
 
@@ -426,6 +482,7 @@ class ModManager:
                 DownloadColumn(),
                 TransferSpeedColumn(),
                 transient=True,
+                console=self.console
             ) as download_progress:
                 # 下载工具函数
                 def download(mod: Mod):
@@ -438,6 +495,7 @@ class ModManager:
                     # 缓冲区
                     buf = BytesIO()
 
+                    self.rl.wait()
                     with requests.get(mod.file_data["url"], stream=True) as r:
                         r.raise_for_status()
                         for chunk in r.iter_content(chunk_size=1024):
@@ -489,5 +547,5 @@ class ModManager:
             e_tree = Tree("下载模组时遇到问题")
             for error in errors:
                 e_tree.add(f"[yellow]{error}[/yellow]")
-            self.msg.append(e_tree)
+            self.finalmsg.append(e_tree)
             return False
