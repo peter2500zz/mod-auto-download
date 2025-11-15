@@ -1,7 +1,6 @@
-from typing import Optional, Self, TYPE_CHECKING, Literal
+from typing import Optional, Self, TYPE_CHECKING, Literal, Generator
 if TYPE_CHECKING:
     from manager import RateLimiter
-from abc import ABC, abstractmethod
 from rich.progress import Progress
 import requests
 import re
@@ -10,9 +9,9 @@ import json
 from moderr import ModError, SlugNotValid, ModNotFoundError
 
 
-class Mod:
-    API: str = "https://api.modrinth.com/v2"
+API = "https://api.modrinth.com/v2"
 
+class Mod:
     slug_or_id: str
     # 参见 https://docs.modrinth.com/api/operations/getproject/
     __project: Optional[dict]
@@ -23,6 +22,8 @@ class Mod:
 
     __target_version: Optional[str]
     __target_loader: Optional[str]
+    __require_client: Optional[bool]
+    __require_server: Optional[bool]
 
     def __init__(self, url: str) -> None:
         slug_or_id = url.split("/")[-1]
@@ -39,23 +40,33 @@ class Mod:
         else:
             raise SlugNotValid(slug_or_id)
 
-    def init(self, game_version: str, loader: str, require_client: bool = True, require_server: bool = True, progress: Optional[Progress] = None, rl: Optional[RateLimiter] = None) -> Self:
+    def init(
+        self, 
+        game_version: str, 
+        loader: str, 
+        require_client: bool = True, 
+        require_server: bool = True, 
+        progress: Optional[Progress] = None,
+        rl: Optional[RateLimiter] = None
+    ) -> Self:
         """
         请求Modrinth的API来初始化自身信息
         """
 
         self.__target_version = game_version
         self.__target_loader = loader
+        self.__require_client = require_client
+        self.__require_server = require_server
 
         if progress:
             progress.print(f"解析 [bright_black]{self.slug_or_id}[/bright_black]")
 
         if rl:
             rl.wait()
-        result = requests.get(self.API + f"/project/{self.slug_or_id}")
+        result = requests.get(API + f"/project/{self.slug_or_id}")
 
         if result.status_code == 404:
-            raise ModNotFoundError(f"无法找到模组 {self.slug_or_id}", self.__project.get("id") if self.__project else None)
+            raise ModNotFoundError(f"无法找到模组 {self.slug_or_id}", self)
         elif result.status_code != 200:
             result.raise_for_status()
 
@@ -65,7 +76,7 @@ class Mod:
             if require_client:
                 match self.__project.get("client_side"):
                     case "unsupported":
-                        raise ModNotFoundError(f"模组 {self.__project.get("title")} 没有客户端版本", self.__project.get("id"))
+                        raise ModNotFoundError(f"模组 {self.__project.get("title")} 没有客户端版本", self)
                     case "unknown":
                         if progress:
                             progress.print(f"[yellow]警告 {f"模组 {self.__project.get("title")} 不确定在客户端是否可用"}[/yellow]")
@@ -73,7 +84,7 @@ class Mod:
             if require_server:
                 match self.__project.get("server_side"):
                     case "unsupported":
-                        raise ModNotFoundError(f"模组 {self.__project.get("title")} 没有服务器版本", self.__project.get("id"))
+                        raise ModNotFoundError(f"模组 {self.__project.get("title")} 没有服务器版本", self)
                     case "unknown":
                         if progress:
                             progress.print(f"[yellow]警告 {f"模组 {self.__project.get("title")} 不确定在服务器是否可用"}[/yellow]")
@@ -102,7 +113,7 @@ class Mod:
 
         if rl:
             rl.wait()
-        result = requests.get(self.API + f"/project/{self.id()}/version", params=params)
+        result = requests.get(API + f"/project/{self.id()}/version", params=params)
 
         if result.status_code == 404:
             raise self.__not_found()
@@ -134,10 +145,10 @@ class Mod:
 
         if rl:
             rl.wait()
-        result = requests.get(self.API + f"/version/{self.__current_version.get("id")}")
+        result = requests.get(API + f"/version/{self.__current_version.get("id")}")
 
         if result.status_code == 404:
-            raise ModNotFoundError(f"无法找到 {self.title()} {self.__current_version.get("version_number")} 版本的下载链接", self.id())
+            raise ModNotFoundError(f"无法找到 {self.title()} {self.__current_version.get("version_number")} 版本的下载链接", self)
         elif result.status_code != 200:
             result.raise_for_status()
 
@@ -148,7 +159,7 @@ class Mod:
 
             break
         else:
-            raise ModNotFoundError(f"{self.title()} {self.__current_version.get("version_number")} 没有任何可用的下载链接", self.id())
+            raise ModNotFoundError(f"{self.title()} {self.__current_version.get("version_number")} 没有任何可用的下载链接", self)
 
     def target_version(self) -> str:
         if self.__target_version is None:
@@ -160,11 +171,21 @@ class Mod:
             self.__not_init()
         return self.__target_loader
 
+    def require_client(self) -> bool:
+        if self.__require_client is None:
+            self.__not_init()
+        return self.__require_client
+
+    def require_server(self) -> bool:
+        if self.__require_server is None:
+            self.__not_init()
+        return self.__require_server
+
     def __not_init(self):
         raise ModError(f"模组 {self.slug_or_id} 还未初始化")
 
     def __not_found(self):
-        raise ModNotFoundError(f"模组 {self.title()} 没有适用于 Minecraft {self.target_version()} {self.target_loader()} 加载器的版本", self.id())
+        raise ModNotFoundError(f"模组 {self.title()} 没有适用于 Minecraft {self.target_version()} {self.target_loader()} 加载器的版本", self)
 
     def project_data(self) -> dict:
         if self.__project is None:
@@ -188,11 +209,19 @@ class Mod:
     def version(self) -> str:
         return self.version_data()["version_number"]
 
-    def dependencies(self) -> list[VerDep | ModDep]:
-        return list(map(generate_dep, self.version_data()["dependencies"]))
+    def dependencies(self, rl: Optional[RateLimiter] = None) -> Generator[Dep, None, None]:
+        for dep_data in self.version_data()["dependencies"]:
+            dep = generate_dep(dep_data, rl=rl)
+
+            dep.require_client = self.require_client()
+            dep.require_server = self.require_server()
+            dep.target_version = self.target_version()
+            dep.target_loader = self.target_loader()
+
+            yield dep
 
 
-class Dep(ABC):
+class Dep:
     id: str
     dep_type: Literal["required", "optional", "incompatible", "embedded"]
     file_name: str
@@ -205,22 +234,50 @@ class Dep(ABC):
     def __init__(self, id: str) -> None:
         self.id = id
 
-    # @abstractmethod
-    # def to_mod(self) -> Mod:
-    #     pass
+    def to_mod(self, progress: Optional[Progress] = None, rl: Optional[RateLimiter] = None) -> Mod:
+        mod = Mod(self.id)
+        mod.init(
+            self.target_version,
+            self.target_loader,
+            self.require_client,
+            self.require_server,
+            progress=progress,
+            rl=rl
+        )
+
+        mod.query_version(
+            progress=progress,
+            rl=rl
+        )
+
+        return mod
+
 
 class ModDep(Dep):
     pass
 
+
 class VerDep(Dep):
-    pass
+    def __init__(self, ver_id: str, rl: RateLimiter | None = None) -> None:
+        if rl:
+            rl.wait()
+        result = requests.get(API + f"/version/{ver_id}")
+
+        if result.status_code == 404:
+            raise ModNotFoundError(f"无法找到 {ver_id}", Mod("ver_id"))
+        elif result.status_code != 200:
+            result.raise_for_status()
+
+        result_data: dict = result.json()
+
+        super().__init__(result_data["project_id"])
 
 
-def generate_dep(data: dict) -> ModDep | VerDep:
-    dep: VerDep | ModDep
+def generate_dep(data: dict, rl: RateLimiter | None = None) -> Dep:
+    dep: Dep
 
     if id := data.get("version_id"):
-        dep = VerDep(id)
+        dep = VerDep(id, rl=rl)
     elif id := data.get("project_id"):
         dep = ModDep(id)
     else:
