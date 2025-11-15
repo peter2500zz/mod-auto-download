@@ -89,7 +89,7 @@ class ModManager:
         self.finalmsg = []
         self.met_condition = set()
 
-    def init_mod(self, require_client: bool, require_server: bool) -> bool:
+    def init_mod(self, version: str, loader: str, require_client: bool, require_server: bool) -> bool:
         """
         统一初始化已有的模组
 
@@ -98,6 +98,9 @@ class ModManager:
 
         self.require_client = require_client
         self.require_server = require_server
+        
+        self.target_version = version
+        self.target_loader = loader
 
         errors: list[ModError] = []
         with Progress(
@@ -109,7 +112,7 @@ class ModManager:
             task_id = progress.add_task("解析模组", True, len(self.mods))
 
             # 多线程初始化
-            futures = [self.__pool.submit(mod.init, require_client, require_server, progress, self.rl) for mod in self.mods]
+            futures = [self.__pool.submit(mod.init, self.target_version, self.target_loader, require_client, require_server, progress, self.rl) for mod in self.mods]
 
             # 等待所有任务结束
             for future in as_completed(futures):
@@ -135,16 +138,12 @@ class ModManager:
             return False
         return True
 
-    def set_version(self, version: str, loader: str) -> bool:
+    def check_version(self) -> bool:
         """
-        设置目标游戏版本和加载器
-        会同时查询所有模组在此版本下的可用性
+        查询所有模组在此目标版本下的可用性
 
         return: 是否应该继续
         """
-
-        self.target_version = version
-        self.target_loader = loader
 
         errors: list[ModError] = []
         with Progress(
@@ -156,7 +155,7 @@ class ModManager:
             task_id = progress.add_task("搜索版本", True, len(self.mods))
 
             # 多线程检查版本可用性
-            futures = [self.__pool.submit(mod.query_version, self.target_version, self.target_loader, progress, self.rl) for mod in self.mods]
+            futures = [self.__pool.submit(mod.query_version, progress, self.rl) for mod in self.mods]
 
             # 等待所有任务结束
             for future in as_completed(futures):
@@ -238,35 +237,35 @@ class ModManager:
 
                 # 遍历本轮次所有需要解析的模组
                 for mod in mods_cur:
-                    if mod.project is None:
-                        raise ModError(f"模组 {mod.slug} 还未初始化")
 
-                    self.all_mods[mod.project["id"]] = mod
+                    self.all_mods[mod.id()] = mod
 
-                    if mod.current_version is None:
+                    try:
+                        mod.version_data()
+                    except ModNotFoundError:
                         # 如果这个模组没有当前版本的信息
                         # 标记为无法获取合适版本的依赖模组
-                        nodes[mod.project["id"]] = {
-                            "label": f"{mod.project["title"]} (无法获取)", 
-                            "_label": f"{mod.project["title"]}", 
+                        nodes[mod.id()] = {
+                            "label": f"{mod.title()} (无法获取)", 
+                            "_label": f"{mod.title()}", 
                             "color": "red", 
-                            "href": f"https://modrinth.com/mod/{mod.project["slug"]}"
+                            "href": f"https://modrinth.com/mod/{mod.slug()}"
                         }
                         continue
 
                     # 把自己加入图节点
-                    nodes[mod.project["id"]] = {
-                        "label": mod.project["title"], 
-                        "_label": mod.project["title"], 
+                    nodes[mod.id()] = {
+                        "label": mod.title(), 
+                        "_label": mod.title(), 
                         "color": "lightgreen", 
-                        "version": mod.current_version,
-                        "href": f"https://modrinth.com/mod/{mod.project["slug"]}"
+                        "version": mod.version_data(),
+                        "href": f"https://modrinth.com/mod/{mod.slug()}"
                     }
 
                     # 获取该模组的依赖
-                    deps: list[dict] = mod.current_version["dependencies"]
+                    deps: list[dict] = mod.version_data()["dependencies"]
 
-                    progress.print(f"解析 [bright_black]{mod.project.get("title")} {mod.current_version.get("version_number")}[/bright_black]")
+                    progress.print(f"解析 [bright_black]{mod.title()} {mod.version()}[/bright_black]")
 
                     for dep in deps:
                         self.met_condition.add(dep["dependency_type"])
@@ -282,7 +281,7 @@ class ModManager:
                             continue
 
                         # 添加依赖箭头
-                        edges.append((dep["project_id"], mod.project["id"], edge_style[dep["dependency_type"]]))
+                        edges.append((dep["project_id"], mod.id(), edge_style[dep["dependency_type"]]))
                         # 模组已经存在（解析过了），不需要进行解析
                         if mod_already_exists:
                             continue
@@ -293,10 +292,8 @@ class ModManager:
 
                 # 快速初始化模组（因为是依赖）
                 def init(mod: Mod):
-                    mod.init(self.require_client, self.require_server, rl=self.rl)
-                    mod.query_version(self.target_version, self.target_loader, rl=self.rl)
-                    if mod.project is None or mod.current_version is None:
-                        raise ModError(f"模组 {mod.slug} 还未初始化")
+                    mod.init(self.target_version, self.target_loader, self.require_client, self.require_server, rl=self.rl)
+                    mod.query_version(rl=self.rl)
 
                 # 多线程解析依赖
                 futures = [self.__pool.submit(init, dep_mod) for dep_mod in dep_mods]
@@ -328,7 +325,7 @@ class ModManager:
                 results = [(_v, _attrs) for _u, _v, _attrs in edges if _u == error.except_mod_id]
 
                 # 如果全都是可选项，且用户不强求此模组
-                if all(item[1].get('type') == 'optional' for item in results) and not any(mod.project["id"] == error.except_mod_id for mod in self.mods if mod.project is not None):
+                if all(item[1].get('type') == 'optional' for item in results) and not any(mod.id() == error.except_mod_id for mod in self.mods if mod.project_data() is not None):
                     # 从错误里删掉这个玩意
                     errors.remove(error)
                     # 还有模组列表
@@ -348,13 +345,13 @@ class ModManager:
             if attrs is None:
                 raise ModError(f"模组 {nid} 没有属性")
             else:
-                if any(mod for mod in self.mods if mod.project and nid == mod.project["id"]):
+                if any(mod for mod in self.mods if mod.project_data() and nid == mod.id()):
                     # 如果这个模组节点是一开始提供的模组，标为深色绿色
                     attrs["color"] = "green"
                 else:
                     # 如果所有关系都是可选项且没主动要求这个模组
                     results = [(_v, _attrs) for _u, _v, _attrs in edges if _u == nid]
-                    if all(item[1].get('type') == 'optional' for item in results) and not any(mod.project["id"] == nid for mod in self.mods if mod.project is not None):
+                    if all(item[1].get('type') == 'optional' for item in results) and not any(mod.id() == nid for mod in self.mods if mod.project_data() is not None):
                         attrs["color"] = "lightgrey"
                 dependencies.add_node(nid, **attrs)
 
@@ -487,7 +484,7 @@ class ModManager:
                 # 下载工具函数
                 def download(mod: Mod):
                     if not mod.file_data:
-                        raise ModError(f"模组 {mod.slug} 还未初始化")
+                        raise ModError(f"模组 {mod.slug_or_id} 还未初始化")
                     _task_id = download_progress.add_task(mod.file_data["filename"], True, mod.file_data["size"])
 
                     # 哈希器

@@ -20,9 +20,9 @@ def get_mod(
         with ModManager(threads, console) as mm:
             mm.mods = mods
 
-            if not mm.init_mod(require_client, require_server):
+            if not mm.init_mod(game_version, loader, require_client, require_server):
                 return
-            if not mm.set_version(game_version, loader):
+            if not mm.check_version():
                 return
             if not mm.resolve_dependencies(allow_optional_mod):
                 return
