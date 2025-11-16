@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Generator, Literal
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import threading
 import networkx as nx
@@ -12,7 +12,7 @@ import hashlib
 from io import BytesIO
 import time
 
-from moderr import ModError, ModNotFoundError
+from moderr import ModError, ModNotFoundError, ModIncompatibleError
 from mod import Mod, Dep
 
 
@@ -90,7 +90,7 @@ class ModManager:
         self.finalmsg = []
         self.met_condition = set()
 
-    def handle_future(self, futures: list[Future], progress: Progress, task_id: TaskID):
+    def handle_future(self, futures: list[Future], progress: Progress, task_id: TaskID) -> Generator[tuple[int, float | None], None, list[ModError]]:
         errors: list[ModError] = []
         for future in as_completed(futures):
             try:
@@ -106,9 +106,10 @@ class ModManager:
                 raise
             finally:
                 progress.update(task_id, advance=1)
+                yield (1, progress.tasks[task_id].total)
         return errors
 
-    def init_mod(self, version: str, loader: str, require_client: bool, require_server: bool) -> bool:
+    def init_mod(self, version: str, loader: str, require_client: bool, require_server: bool) -> Generator[tuple[int, float | None], None, bool]:
         """
         统一初始化已有的模组
 
@@ -131,11 +132,12 @@ class ModManager:
             task_id = progress.add_task("解析模组", True, len(self.mods))
 
             # 多线程初始化
-            errors.extend(self.handle_future(
+            result = yield from self.handle_future(
                 [self.__pool.submit(mod.init, self.target_version, self.target_loader, require_client, require_server, progress, self.rl) for mod in self.mods], 
                 progress, 
                 task_id
-            ))
+            )
+            errors.extend(result)
 
         if errors:
             e_tree = Tree("由于以下原因，将不会继续")
@@ -145,7 +147,7 @@ class ModManager:
             return False
         return True
 
-    def check_version(self) -> bool:
+    def check_version(self) -> Generator[tuple[int, float | None], None, bool]:
         """
         查询所有模组在此目标版本下的可用性
 
@@ -162,11 +164,12 @@ class ModManager:
             task_id = progress.add_task("搜索版本", True, len(self.mods))
 
             # 多线程检查版本可用性
-            errors.extend(self.handle_future(
+            result = yield from self.handle_future(
                 [self.__pool.submit(mod.query_version, progress, self.rl) for mod in self.mods], 
                 progress, 
                 task_id
-            ))
+            )
+            errors.extend(result)
 
         if errors:
             e_tree = Tree("由于以下原因，将不会继续")
@@ -176,7 +179,7 @@ class ModManager:
             return False
         return True
 
-    def resolve_dependencies(self, allow_optional_mod: bool = False) -> bool:
+    def resolve_dependencies(self, allow_optional_mod: bool = False) -> Generator[tuple[int, float | None], None, bool]:
         """
         解析所有模组在设定版本下的依赖
 
@@ -244,12 +247,15 @@ class ModManager:
                         mod, deps = future.result()
                         nodes[mod.id()] = mod
                         for dep in deps:
+                            if not allow_optional_mod and dep.dep_type == "optional":
+                                continue
                             edges.append((
                                 dep.id,
                                 mod.id(),
                                 dep
                             ))
-                            mods_next_pre[dep.id] = dep
+                            if dep.id not in nodes and dep.id not in mods_next_pre:
+                                mods_next_pre[dep.id] = dep
                     except ModError as e:
                         progress.print(f"[yellow]警告 {e}[/yellow]")
                         errors.append(e)
@@ -260,25 +266,31 @@ class ModManager:
                         raise
                     finally:
                         progress.update(task_id, advance=1)
+                        yield (1, progress.tasks[task_id].total)
 
-                futures = [self.__pool.submit(dep.to_mod) for dep in mods_next_pre.values()]
+                futures = [self.__pool.submit(dep.to_mod, rl=self.rl) for dep in mods_next_pre.values()]
 
                 for future in as_completed(futures):
                     try:
                         mod = future.result()
+                        if mod.id() not in nodes:
+                            nodes[mod.id()] = mod
+                            mods_next.append(mod)
                     except ModError as e:
-                        if isinstance(e, ModNotFoundError):
-                            nodes[e.except_mod.id()] = e.except_mod
                         progress.print(f"[yellow]警告 {e}[/yellow]")
+                        if isinstance(e, ModNotFoundError):
+                            not_required_actually = all(dep.dep_type == "optional" for u, _, dep in edges if u == e.except_mod.id()) and any(dep.dep_type == "optional" for u, _, dep in edges if u == e.except_mod.id())
+                            if not_required_actually:
+                                self.finalmsg.append(f"[yellow]{e}，但是所有需要它的模组都不是强制需求，已从依赖中删除此模组[/yellow]")
+                                edges = [(u, v, dep) for u, v, dep in edges if u != e.except_mod.id()]
+                                continue
+                            nodes[e.except_mod.id()] = e.except_mod
                         errors.append(e)
                     except Exception:
                         progress.stop()
                         self.__pool.shutdown()
 
                         raise
-                    finally:
-                        if mod.id() not in nodes:
-                            mods_next.append(mod)
 
                 mods_cur = mods_next
 
@@ -301,7 +313,7 @@ class ModManager:
             else:
                 if id in required_mods:
                     attrs["color"] = "green"
-                elif all(dep.dep_type == "optional" for _, v, dep in edges if v == id) and any(dep.dep_type == "optional" for _, v, dep in edges if v == id):
+                elif all(dep.dep_type == "optional" for u, _, dep in edges if u == id) and any(dep.dep_type == "optional" for u, _, dep in edges if u == id):
                     attrs["color"] = "lightgrey"
                 else:
                     attrs["color"] = "lightgreen"
@@ -310,9 +322,32 @@ class ModManager:
             dependencies.add_node(id, **attrs)
 
         # 存入边
+        incompatibles: dict[str, list[str]] = {}
         for u, v, dep in edges:
+            self.met_condition.add(dep.dep_type)
             attrs = edge_style[dep.dep_type]
             dependencies.add_edge(u, v, **attrs)
+            if dep.dep_type == "incompatible":
+                incompatibles[u] = incompatibles.get(u, [])
+                incompatibles[u].append(v)
+
+        for id, deps in incompatibles.items():
+            root: Tree
+            if len(deps) > 1:
+                root = Tree(f"[yellow]{nodes[id].title()} 与多个模组不兼容[/yellow]")
+                for dep in deps:
+                    root.add(f"[yellow]不兼容 {nodes[dep].title()}[/yellow]")
+            else:
+                root = Tree(f"[yellow]{nodes[id].title()} 与 {nodes[deps[0]].title()} 不兼容[/yellow]")
+            the_mods_that_require_this_one = [_v for _u, _v, _dep in edges if _u == id and (_dep.dep_type == "required" or _dep.dep_type == "optional")]
+            if the_mods_that_require_this_one:
+                if len(the_mods_that_require_this_one) > 1:
+                    dep_root = Tree("但是以下模组依赖它")
+                    for mod in the_mods_that_require_this_one:
+                        dep_root.add(f"{nodes[mod].title()}")
+                else:
+                    dep_root = f"但是 {nodes[the_mods_that_require_this_one[0]].title()} 依赖它"
+            errors.append(ModIncompatibleError(root))
 
         # 创建可视化图
         net = Network(width="100%", height="100vh", notebook=False, directed=True, cdn_resources='local')
@@ -324,6 +359,19 @@ class ModManager:
         if errors:
             e_tree = Tree("由于以下原因，将不会继续")
             for error in errors:
+                if isinstance(error, ModNotFoundError):
+                    root = Tree(f"[yellow]{error}[/yellow]")
+                    the_mods_that_require_this_one = [_v for _u, _v, _dep in edges if _u == error.except_mod.id() and (_dep.dep_type == "required" or _dep.dep_type == "optional")]
+                    if the_mods_that_require_this_one:
+                        if len(the_mods_that_require_this_one) > 1:
+                            dep_root = Tree("但是以下模组依赖它")
+                            for mod in the_mods_that_require_this_one:
+                                dep_root.add(f"{nodes[mod].title()}")
+                        else:
+                            dep_root = f"但是 {nodes[the_mods_that_require_this_one[0]].title()} 依赖它"
+                        root.add(dep_root)
+                    e_tree.add(root)
+                    continue
                 for arg in error.args:
                     if isinstance(arg, Tree):
                         e_tree.add(arg)
@@ -343,13 +391,7 @@ class ModManager:
             return False
         return True
 
-    def download_mods(self, mod_dir: str):
-        # 转换为路径
-        mod_path = Path(mod_dir)
-        # 创建下载目录
-        mod_path.mkdir(parents=True, exist_ok=True)
-
-
+    def get_download_link(self) -> Generator[tuple[int, float | None], None, bool]:
         errors: list[Exception] = []
         with Progress(
             TextColumn("[progress.description]{task.description}"),
@@ -360,11 +402,12 @@ class ModManager:
             task_id = progress.add_task("获取下载链接", True, len(self.all_mods))
 
             # 多线程查找下载链接
-            errors.extend(self.handle_future(
+            result = yield from self.handle_future(
                 [self.__pool.submit(mod.get_version, progress, self.rl) for mod in self.all_mods.values()], 
                 progress, 
                 task_id
-            ))
+            )
+            errors.extend(result)
 
             
         if errors:
@@ -373,8 +416,15 @@ class ModManager:
                 e_tree.add(f"[yellow]{error}[/yellow]")
             self.finalmsg.append(e_tree)
             return False
+        return True
 
-        errors = []
+    def download_mods(self, mod_dir: str) -> Generator[tuple[int, float | None], None, bool]:
+        # 转换为路径
+        mod_path = Path(mod_dir)
+        # 创建下载目录
+        mod_path.mkdir(parents=True, exist_ok=True)
+
+        errors: list[Exception] = []
         with Progress(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
@@ -429,11 +479,12 @@ class ModManager:
                     download_progress.remove_task(_task_id)
 
                 # 多线程下载模组
-                errors.extend(self.handle_future(
+                result = yield from self.handle_future(
                     [self.__pool.submit(download, mod) for mod in self.all_mods.values()], 
                     progress, 
                     task_id
-                ))
+                )
+                errors.extend(result)
 
         if errors:
             e_tree = Tree("下载模组时遇到问题")
@@ -441,3 +492,4 @@ class ModManager:
                 e_tree.add(f"[yellow]{error}[/yellow]")
             self.finalmsg.append(e_tree)
             return False
+        return True

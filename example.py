@@ -1,9 +1,18 @@
+from typing import Generator
 from rich.console import Console
 import sys
 
 from manager import ModManager
 from mod import Mod
 
+
+def exhaust(progress: Generator[tuple[int, float | None], None, bool]) -> bool:
+    while True:
+        try:
+            advance, total = next(progress)
+            # print(f"进度 {advance}/{total}")
+        except StopIteration as e:
+            return e.value
 
 def get_mod(
     mods: list[Mod], 
@@ -20,13 +29,15 @@ def get_mod(
         with ModManager(threads, console) as mm:
             mm.mods = mods
 
-            if not mm.init_mod(game_version, loader, require_client, require_server):
+            if not exhaust(mm.init_mod(game_version, loader, require_client, require_server)):
                 return
-            if not mm.check_version():
+            if not exhaust(mm.check_version()):
                 return
-            if not mm.resolve_dependencies(allow_optional_mod):
+            if not exhaust(mm.resolve_dependencies(allow_optional_mod)):
                 return
-            if not mm.download_mods(download_dir):
+            if not exhaust(mm.get_download_link()):
+                return
+            if not exhaust(mm.download_mods(download_dir)):
                 return
 
     except KeyboardInterrupt:
