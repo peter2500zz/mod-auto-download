@@ -1,4 +1,4 @@
-from typing import Optional, Self, TYPE_CHECKING, Literal, Generator
+from typing import Optional, TYPE_CHECKING, Literal, Generator
 if TYPE_CHECKING:
     from manager import RateLimiter
 from rich.progress import Progress
@@ -48,7 +48,7 @@ class Mod:
         require_server: bool = True, 
         progress: Optional[Progress] = None,
         rl: Optional[RateLimiter] = None
-    ) -> Self:
+    ) -> str:
         """
         请求Modrinth的API来初始化自身信息
         """
@@ -88,15 +88,16 @@ class Mod:
                     case "unknown":
                         if progress:
                             progress.print(f"[yellow]警告 {f"模组 {self.__project.get("title")} 不确定在服务器是否可用"}[/yellow]")
-            
-            if progress:
-                progress.print(f"成功 [green]{self.__project.get("title")}[/green]")
 
-            return self
+            message = f"成功 [green]{self.__project.get("title")}[/green]"
+            if progress:
+                progress.print(message)
+
+            return message
 
         raise ModError(f"{self.slug_or_id} 的数据解析失败")
 
-    def query_version(self, progress: Optional[Progress] = None, rl: Optional[RateLimiter] = None):
+    def query_version(self, progress: Optional[Progress] = None, rl: Optional[RateLimiter] = None) -> str:
         """
         根据给定游戏版本和加载器来查找最新的模组
         """
@@ -129,19 +130,22 @@ class Mod:
 
             if version_condition and loader_condition:
                 # 如果匹配直接跳出并存储版本信息
+                message = f"找到 [bright_black]{self.title()} {version.get("version_number")}[/bright_black]"
                 if progress:
-                    progress.print(f"找到 [bright_black]{self.title()} {version.get("version_number")}[/bright_black]")
+                    progress.print(message)
                 self.__current_version = version
-                break
+                return message
 
         else:
             raise self.__not_found()
 
-    def get_version(self, progress: Optional[Progress] = None, rl: Optional[RateLimiter] = None):
+    def get_version(self, progress: Optional[Progress] = None, rl: Optional[RateLimiter] = None) -> str:
         if not self.__project or not self.__current_version:
             self.__not_init()
+
+        message = f"获取 [bright_black]{self.title()} {self.__current_version.get("version_number")}[/bright_black]"
         if progress:
-            progress.print(f"获取 [bright_black]{self.title()} {self.__current_version.get("version_number")}[/bright_black]")
+            progress.print(message)
 
         if rl:
             rl.wait()
@@ -157,7 +161,7 @@ class Mod:
         for file in result_data.get("files", []):
             self.file_data = file
 
-            break
+            return message
         else:
             raise ModNotFoundError(f"{self.title()} {self.__current_version.get("version_number")} 没有任何可用的下载链接", self)
 

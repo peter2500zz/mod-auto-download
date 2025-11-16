@@ -1,4 +1,4 @@
-from typing import Generator, Literal
+from typing import Generator, Literal, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import threading
 import networkx as nx
@@ -40,6 +40,8 @@ class RateLimiter:
                 time.sleep(self.rate_limit - delta)
 
             self.last_req = time.time()
+
+ProgressGen = Generator[tuple[int, float | None, str | None], None, Sequence[Exception]]
 
 class ModManager:
     # 限制请求速率
@@ -90,13 +92,15 @@ class ModManager:
         self.finalmsg = []
         self.met_condition = set()
 
-    def handle_future(self, futures: list[Future], progress: Progress, task_id: TaskID) -> Generator[tuple[int, float | None], None, list[ModError]]:
+    def handle_future(self, futures: list[Future], progress: Progress, task_id: TaskID) -> Generator[tuple[int, float | None, str | None], None, list[ModError]]:
         errors: list[ModError] = []
         for future in as_completed(futures):
+            message = None
             try:
-                future.result()
+                message = future.result()
             except ModError as e:
-                progress.print(f"[yellow]警告 {e}[/yellow]")
+                message = f"[yellow]警告 {e}[/yellow]"
+                progress.print(message)
                 errors.append(e)
             except Exception:
                 # 真的很异常的异常应当上报
@@ -106,10 +110,10 @@ class ModManager:
                 raise
             finally:
                 progress.update(task_id, advance=1)
-                yield (1, progress.tasks[task_id].total)
+                yield (1, progress.tasks[task_id].total, message)
         return errors
 
-    def init_mod(self, version: str, loader: str, require_client: bool, require_server: bool) -> Generator[tuple[int, float | None], None, bool]:
+    def init_mod(self, version: str, loader: str, require_client: bool, require_server: bool) -> ProgressGen:
         """
         统一初始化已有的模组
 
@@ -144,10 +148,9 @@ class ModManager:
             for error in errors:
                 e_tree.add(f"[yellow]{error}[/yellow]")
             self.finalmsg.append(e_tree)
-            return False
-        return True
+        return errors
 
-    def check_version(self) -> Generator[tuple[int, float | None], None, bool]:
+    def check_version(self) -> ProgressGen:
         """
         查询所有模组在此目标版本下的可用性
 
@@ -176,10 +179,9 @@ class ModManager:
             for error in errors:
                 e_tree.add(f"[yellow]{error}[/yellow]")
             self.finalmsg.append(e_tree)
-            return False
-        return True
+        return errors
 
-    def resolve_dependencies(self, allow_optional_mod: bool = False) -> Generator[tuple[int, float | None], None, bool]:
+    def resolve_dependencies(self, allow_optional_mod: bool = False) -> ProgressGen:
         """
         解析所有模组在设定版本下的依赖
 
@@ -230,9 +232,9 @@ class ModManager:
             mods_next_pre: dict[str, Dep]
             mods_next: list[Mod]
 
-            def resolve(mod: Mod) -> tuple[Mod, list[Dep]]:
+            def resolve(mod: Mod) -> tuple[Mod, list[Dep], str]:
                 progress.print(f"解析 [bright_black]{mod.title()} {mod.version()}[/bright_black]")
-                return (mod, list(mod.dependencies(self.rl)))
+                return (mod, list(mod.dependencies(self.rl)), f"解析 {mod.title()} {mod.version()}")
 
             mods_cur = self.mods.copy()
             while mods_cur:
@@ -244,7 +246,7 @@ class ModManager:
 
                 for future in as_completed(futures):
                     try:
-                        mod, deps = future.result()
+                        mod, deps, message = future.result()
                         nodes[mod.id()] = mod
                         for dep in deps:
                             if not allow_optional_mod and dep.dep_type == "optional":
@@ -257,7 +259,8 @@ class ModManager:
                             if dep.id not in nodes and dep.id not in mods_next_pre:
                                 mods_next_pre[dep.id] = dep
                     except ModError as e:
-                        progress.print(f"[yellow]警告 {e}[/yellow]")
+                        message = f"[yellow]警告 {e}[/yellow]"
+                        progress.print(message)
                         errors.append(e)
                     except Exception:
                         progress.stop()
@@ -266,7 +269,7 @@ class ModManager:
                         raise
                     finally:
                         progress.update(task_id, advance=1)
-                        yield (1, progress.tasks[task_id].total)
+                        yield (1, progress.tasks[task_id].total, message)
 
                 futures = [self.__pool.submit(dep.to_mod, rl=self.rl) for dep in mods_next_pre.values()]
 
@@ -277,7 +280,8 @@ class ModManager:
                             nodes[mod.id()] = mod
                             mods_next.append(mod)
                     except ModError as e:
-                        progress.print(f"[yellow]警告 {e}[/yellow]")
+                        message = f"[yellow]警告 {e}[/yellow]"
+                        progress.print(message)
                         if isinstance(e, ModNotFoundError):
                             not_required_actually = all(dep.dep_type == "optional" for u, _, dep in edges if u == e.except_mod.id()) and any(dep.dep_type == "optional" for u, _, dep in edges if u == e.except_mod.id())
                             if not_required_actually:
@@ -286,6 +290,7 @@ class ModManager:
                                 continue
                             nodes[e.except_mod.id()] = e.except_mod
                         errors.append(e)
+                        yield (0, progress.tasks[task_id].total, message)
                     except Exception:
                         progress.stop()
                         self.__pool.shutdown()
@@ -388,10 +393,9 @@ class ModManager:
                 dep_desc.add("[bold][#FF0000]红色[/][/bold]节点/箭头代表冲突项目")
             self.finalmsg.append(dep_desc)
 
-            return False
-        return True
+        return errors
 
-    def get_download_link(self) -> Generator[tuple[int, float | None], None, bool]:
+    def get_download_link(self) -> ProgressGen:
         errors: list[Exception] = []
         with Progress(
             TextColumn("[progress.description]{task.description}"),
@@ -415,10 +419,9 @@ class ModManager:
             for error in errors:
                 e_tree.add(f"[yellow]{error}[/yellow]")
             self.finalmsg.append(e_tree)
-            return False
-        return True
+        return errors
 
-    def download_mods(self, mod_dir: str) -> Generator[tuple[int, float | None], None, bool]:
+    def download_mods(self, mod_dir: str) -> ProgressGen:
         # 转换为路径
         mod_path = Path(mod_dir)
         # 创建下载目录
@@ -442,7 +445,7 @@ class ModManager:
                 console=self.console
             ) as download_progress:
                 # 下载工具函数
-                def download(mod: Mod):
+                def download(mod: Mod) -> str:
                     if not mod.file_data:
                         raise ModError(f"模组 {mod.slug_or_id} 还未初始化")
                     _task_id = download_progress.add_task(mod.file_data["filename"], True, mod.file_data["size"])
@@ -474,9 +477,15 @@ class ModManager:
                         f.write(buf.getbuffer())
                     buf.close()
 
-                    progress.print(f"保存为 [bright_black]{(mod_path / mod.file_data["filename"]).relative_to(".")}[/bright_black]")
+                    try:
+                        message = f"保存为 [bright_black]{(mod_path / mod.file_data["filename"]).relative_to(".")}[/bright_black]"
+                        progress.print(message)
+                    except ValueError:
+                        message = f"保存为 [bright_black]{(mod_path / mod.file_data["filename"])}[/bright_black]"
+                        progress.print(message)
 
                     download_progress.remove_task(_task_id)
+                    return message
 
                 # 多线程下载模组
                 result = yield from self.handle_future(
@@ -491,5 +500,4 @@ class ModManager:
             for error in errors:
                 e_tree.add(f"[yellow]{error}[/yellow]")
             self.finalmsg.append(e_tree)
-            return False
-        return True
+        return errors

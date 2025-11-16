@@ -12,3 +12,8 @@ lib
 dependencies.html
 mods
 test.py
+modmanager_gui_config.json
+mods.txt
+super_gui.*
+ico.*
+build.bat
