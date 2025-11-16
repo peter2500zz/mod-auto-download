@@ -12,7 +12,7 @@ import hashlib
 from io import BytesIO
 import time
 
-from moderr import ModError, ModNotFoundError
+from moderr import ModError, ModNotFoundError, ModIncompatibleError
 from mod import Mod, Dep
 
 
@@ -249,7 +249,8 @@ class ModManager:
                                 mod.id(),
                                 dep
                             ))
-                            mods_next_pre[dep.id] = dep
+                            if dep.id not in nodes and dep.id not in mods_next_pre:
+                                mods_next_pre[dep.id] = dep
                     except ModError as e:
                         progress.print(f"[yellow]警告 {e}[/yellow]")
                         errors.append(e)
@@ -261,24 +262,29 @@ class ModManager:
                     finally:
                         progress.update(task_id, advance=1)
 
-                futures = [self.__pool.submit(dep.to_mod) for dep in mods_next_pre.values()]
+                futures = [self.__pool.submit(dep.to_mod, rl=self.rl) for dep in mods_next_pre.values()]
 
                 for future in as_completed(futures):
                     try:
                         mod = future.result()
+                        if mod.id() not in nodes:
+                            nodes[mod.id()] = mod
+                            mods_next.append(mod)
                     except ModError as e:
-                        if isinstance(e, ModNotFoundError):
-                            nodes[e.except_mod.id()] = e.except_mod
                         progress.print(f"[yellow]警告 {e}[/yellow]")
+                        if isinstance(e, ModNotFoundError):
+                            not_required_actually = all(dep.dep_type == "optional" for u, _, dep in edges if u == e.except_mod.id()) and any(dep.dep_type == "optional" for u, _, dep in edges if u == e.except_mod.id())
+                            if not_required_actually:
+                                self.finalmsg.append(f"[yellow]{e}，但是所有需要它的模组都不是强制需求，已从依赖中删除此模组[/yellow]")
+                                edges = [(u, v, dep) for u, v, dep in edges if u != e.except_mod.id()]
+                                continue
+                            nodes[e.except_mod.id()] = e.except_mod
                         errors.append(e)
                     except Exception:
                         progress.stop()
                         self.__pool.shutdown()
 
                         raise
-                    finally:
-                        if mod.id() not in nodes:
-                            mods_next.append(mod)
 
                 mods_cur = mods_next
 
@@ -310,9 +316,32 @@ class ModManager:
             dependencies.add_node(id, **attrs)
 
         # 存入边
+        incompatibles: dict[str, list[str]] = {}
         for u, v, dep in edges:
+            self.met_condition.add(dep.dep_type)
             attrs = edge_style[dep.dep_type]
             dependencies.add_edge(u, v, **attrs)
+            if dep.dep_type == "incompatible":
+                incompatibles[u] = incompatibles.get(u, [])
+                incompatibles[u].append(v)
+
+        for id, deps in incompatibles.items():
+            root: Tree
+            if len(deps) > 1:
+                root = Tree(f"[yellow]{nodes[id].title()} 与多个模组不兼容[/yellow]")
+                for dep in deps:
+                    root.add(f"[yellow]不兼容 {nodes[dep].title()}[/yellow]")
+            else:
+                root = Tree(f"[yellow]{nodes[id].title()} 与 {nodes[deps[0]].title()} 不兼容[/yellow]")
+            the_mods_that_require_this_one = [_v for _u, _v, _dep in edges if _u == id and (_dep.dep_type == "required" or _dep.dep_type == "optional")]
+            if the_mods_that_require_this_one:
+                if len(the_mods_that_require_this_one) > 1:
+                    dep_root = Tree("但是以下模组依赖它")
+                    for mod in the_mods_that_require_this_one:
+                        dep_root.add(f"{nodes[mod].title()}")
+                else:
+                    dep_root = f"但是 {nodes[the_mods_that_require_this_one[0]].title()} 依赖它"
+            errors.append(ModIncompatibleError(root))
 
         # 创建可视化图
         net = Network(width="100%", height="100vh", notebook=False, directed=True, cdn_resources='local')
@@ -324,6 +353,19 @@ class ModManager:
         if errors:
             e_tree = Tree("由于以下原因，将不会继续")
             for error in errors:
+                if isinstance(error, ModNotFoundError):
+                    root = Tree(f"[yellow]{error}[/yellow]")
+                    the_mods_that_require_this_one = [_v for _u, _v, _dep in edges if _u == error.except_mod.id() and (_dep.dep_type == "required" or _dep.dep_type == "optional")]
+                    if the_mods_that_require_this_one:
+                        if len(the_mods_that_require_this_one) > 1:
+                            dep_root = Tree("但是以下模组依赖它")
+                            for mod in the_mods_that_require_this_one:
+                                dep_root.add(f"{nodes[mod].title()}")
+                        else:
+                            dep_root = f"但是 {nodes[the_mods_that_require_this_one[0]].title()} 依赖它"
+                        root.add(dep_root)
+                    e_tree.add(root)
+                    continue
                 for arg in error.args:
                     if isinstance(arg, Tree):
                         e_tree.add(arg)
